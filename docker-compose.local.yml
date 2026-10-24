@@ -1,0 +1,38 @@
+# Start: docker compose -f docker-compose.local.yml up -d
+# Application settings remain DATABASE_URL and REDIS_URL.
+# With the default LOCAL_ values, use:
+# DATABASE_URL=postgresql://auth:auth@localhost:5432/auth
+# REDIS_URL=redis://localhost:6379/0
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${LOCAL_POSTGRES_USER:?Set LOCAL_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_PASSWORD:?Set LOCAL_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${LOCAL_POSTGRES_DB:?Set LOCAL_POSTGRES_DB in .env}
+    ports:
+      - "127.0.0.1:${LOCAL_POSTGRES_PORT:?Set LOCAL_POSTGRES_PORT in .env}:5432"
+    volumes:
+      - local_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${LOCAL_REDIS_PORT:?Set LOCAL_REDIS_PORT in .env}:6379"
+    volumes:
+      - local_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  local_postgres_data:
+  local_redis_data:
