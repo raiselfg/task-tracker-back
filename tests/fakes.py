@@ -2,7 +2,6 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 from app.core.config import Settings
-from app.repository.session_cache import SessionCache
 from app.services.auth import AuthService
 
 
@@ -65,26 +64,20 @@ class MemoryRedis:
             return None
         return value
 
-    async def set(self, key, value, *, ex, nx=False):
-        if nx and await self.get(key) is not None:
-            return False
+    async def set(self, key, value, *, ex):
         self.records[key] = (value, self.clock() + timedelta(seconds=ex))
         return True
 
-    async def eval(self, script, key_count, key, expected, value, ttl):
-        assert key_count == 1
-        if await self.get(key) == expected:
-            await self.set(key, value, ex=ttl)
-            return "OK"
-        return None
+    async def delete(self, key):
+        return int(self.records.pop(key, None) is not None)
 
 
 def make_service(clock):
     service = AuthService(
         AsyncMock(),
         Settings(_env_file=None, allowed_origins=["https://app.example.com"]),
-        clock,
-        cache=SessionCache(MemoryRedis(clock)),
+        redis=MemoryRedis(clock),
+        clock=clock,
     )
     service.users = Users()
     service.sessions = Sessions()

@@ -9,13 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
-    app_env: Literal["development", "production"] = "development"
-    database_url: SecretStr = SecretStr("postgresql://auth:auth@localhost:5432/auth")
-    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
-    allowed_origins: list[str] = Field(default_factory=list)
-    allow_insecure_cookies: bool = False
-    session_cache_ttl_seconds: int = Field(default=300, gt=0)
-    session_ttl_seconds: int = Field(default=30 * 24 * 3600, gt=0)
+    app_env: Literal["development", "production"]
+    database_url: SecretStr
+    redis_url: SecretStr
+    allowed_origins: list[str]
+    allow_insecure_cookies: bool
+    session_ttl_seconds: int
 
     @model_validator(mode="after")
     def validate_security(self):

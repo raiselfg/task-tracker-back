@@ -37,8 +37,8 @@ async def test_case_sensitive_registration_and_login(auth):
     upper, upper_token = await register_and_login(service, "User")
     lower, lower_token = await register_and_login(service, "user")
     assert upper.id != lower.id
-    assert (await service.authenticate(upper_token)).user.id == upper.id
-    assert (await service.authenticate(lower_token)).user.id == lower.id
+    assert (await service.verify_session(upper_token)).user.id == upper.id
+    assert (await service.verify_session(lower_token)).user.id == lower.id
     assert service.users.lookups == ["User", "User", "user", "user"]
     with pytest.raises(InvalidCredentialsError):
         await service.login("USER", PASSWORD)
@@ -106,17 +106,17 @@ async def test_expiry_at_boundary(auth, seconds_after_expiry):
     original_expiry = record.expires_at
     clock.now = original_expiry + timedelta(seconds=seconds_after_expiry)
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+        await service.verify_session(token)
     assert record.expires_at == original_expiry
 
 
 async def test_current_session_revocation(auth):
     service, _ = auth
     _, token = await register_and_login(service)
-    current = await service.authenticate(token)
+    current = await service.verify_session(token)
     await service.logout(current)
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+        await service.verify_session(token)
 
 
 @pytest.mark.parametrize("token", [None, "", "invalid", "я" * 43])
@@ -124,7 +124,7 @@ async def test_malformed_token_never_reaches_repository(auth, token):
     service, _ = auth
     service.sessions.get_active = AsyncMock()
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+        await service.verify_session(token)
     service.sessions.get_active.assert_not_awaited()
 
 
@@ -149,7 +149,7 @@ async def test_session_renews_for_thirty_days_on_activity(auth):
     assert record.expires_at == clock.now + timedelta(days=30)
     for _ in range(3):
         clock.now += timedelta(days=29)
-        current = await service.authenticate(token)
+        current = await service.verify_session(token)
         assert current.session.expires_at == clock.now + timedelta(days=30)
 
 
@@ -163,7 +163,7 @@ async def test_revoked_session_is_not_restored_during_refresh(auth):
 
     service.sessions.refresh = AsyncMock(side_effect=concurrent_logout)
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+        await service.verify_session(token)
     assert not service.sessions.records
 
 
@@ -171,183 +171,81 @@ async def test_logout_keeps_other_sessions(auth):
     service, _ = auth
     _, first = await register_and_login(service)
     _, second = await service.login("User", PASSWORD)
-    current = await service.authenticate(first)
+    current = await service.verify_session(first)
     await service.logout(current)
     await service.logout(current)  # Concurrent logout does not fail on a missing row.
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(first)
-    assert (await service.authenticate(second)).user.id == current.user.id
+        await service.verify_session(first)
+    assert (await service.verify_session(second)).user.id == current.user.id
 
 
-async def test_cache_hit_does_not_access_postgres(auth):
+async def test_cache_hit_skips_database_and_expires_after_sixty_seconds(auth):
     service, clock = auth
     _, token = await register_and_login(service)
-    await service.authenticate(token)
+    service.sessions.get_active = AsyncMock(wraps=service.sessions.get_active)
+    await service.verify_session(token)
     service.transaction.reset_mock()
-    service.sessions.get_active = AsyncMock(side_effect=AssertionError("Unexpected SQL"))
-    service.users.by_id = AsyncMock(side_effect=AssertionError("Unexpected SQL"))
-    clock.now += timedelta(seconds=150)
-    current = await service.authenticate(token)
-    assert current.user.login == "User"
+    clock.now += timedelta(seconds=59)
+    current = await service.verify_session(token)
+    assert service.sessions.get_active.await_count == 1
     service.transaction.commit.assert_not_awaited()
-    service.sessions.get_active.assert_not_awaited()
-    service.users.by_id.assert_not_awaited()
+    assert current.user.login == "User"
+    clock.now += timedelta(seconds=1)
+    current = await service.verify_session(token)
+    assert service.sessions.get_active.await_count == 2
+    assert current.session.expires_at == clock.now + timedelta(days=30)
+    await service.logout(current)
+    with pytest.raises(AuthenticationRequiredError):
+        await service.verify_session(token)
 
 
-async def test_cache_expires_even_with_activity(auth):
-    service, clock = auth
-    _, token = await register_and_login(service)
-    current = await service.authenticate(token)
-    expiry = current.session.expires_at
-    clock.now += timedelta(seconds=150)
-    assert (await service.authenticate(token)).session.expires_at == expiry
-    clock.now += timedelta(seconds=150)
-    assert (await service.authenticate(token)).session.expires_at == clock.now + timedelta(days=30)
-
-
-async def test_cache_contains_no_password_or_raw_token(auth):
+async def test_cache_contains_public_data_and_no_raw_token(auth):
     service, _ = auth
     _, token = await register_and_login(service)
-    await service.authenticate(token)
-    key, (value, _) = next(iter(service.cache.redis.records.items()))
-    assert token_hash(token) in key
+    await service.verify_session(token)
+    key, (value, _) = next(iter(service.redis.records.items()))
+    assert key == f"auth:session:{token_hash(token)}"
     assert token not in key + value
     assert "password" not in value
     assert "$argon2" not in value
 
 
-async def test_logout_marker_blocks_late_cache_fill(auth):
-    from app.repository.session_cache import CachedSession, RevokedSessionError
-    from app.schemas.user import UserRead
+@pytest.mark.parametrize("operation", ["get", "set", "delete"])
+async def test_redis_failure_falls_back_to_database(auth, operation):
+    from redis.exceptions import ConnectionError
 
-    service, clock = auth
+    service, _ = auth
     _, token = await register_and_login(service)
-    current = await service.authenticate(token)
-    entry = CachedSession(
-        id=current.session.id,
-        user=UserRead.model_validate(current.user),
-        expires_at=current.session.expires_at,
-    )
+    setattr(service.redis, operation, AsyncMock(side_effect=ConnectionError("unavailable")))
+    current = await service.verify_session(token)
+    assert current.user.login == "User"
     await service.logout(current)
-    # Even a very delayed cache fill cannot overwrite logout's marker.
-    clock.now += timedelta(seconds=301)
-    with pytest.raises(RevokedSessionError):
-        await service.cache.put(token_hash(token), entry, 300)
-    with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+    assert not service.sessions.records
 
 
-async def test_redis_cache_loss_keeps_postgres_session(auth):
+async def test_failed_commit_does_not_fill_cache(auth):
     service, _ = auth
     _, token = await register_and_login(service)
-    await service.authenticate(token)
-    service.cache.redis.records.clear()
-    assert (await service.authenticate(token)).user.login == "User"
-
-
-async def test_cache_fill_happens_before_database_commit(auth):
-    service, _ = auth
-    _, token = await register_and_login(service)
-    service.transaction.commit.reset_mock()
-    original_put = service.cache.put
-
-    async def cache_while_locked(*args):
-        service.transaction.commit.assert_not_awaited()
-        return await original_put(*args)
-
-    service.cache.put = AsyncMock(side_effect=cache_while_locked)
-    await service.authenticate(token)
-    service.cache.put.assert_awaited_once()
-    service.transaction.commit.assert_awaited_once()
-
-
-async def test_logout_deletes_row_before_revoking_cache_and_committing(auth):
-    service, _ = auth
-    _, token = await register_and_login(service)
-    current = await service.authenticate(token)
-    service.transaction.commit.reset_mock()
-    original_revoke = service.cache.revoke
-
-    async def revoke_after_delete(*args):
-        assert current.session.id not in service.sessions.records
-        service.transaction.commit.assert_not_awaited()
-        await original_revoke(*args)
-
-    service.cache.revoke = AsyncMock(side_effect=revoke_after_delete)
-    await service.logout(current)
-    service.cache.revoke.assert_awaited_once()
-    service.transaction.commit.assert_awaited_once()
-
-
-async def test_failed_commit_never_caches_uncommitted_expiry(auth):
-    service, clock = auth
-    _, token = await register_and_login(service)
-    row = next(iter(service.sessions.records.values()))
-    committed_expiry = clock.now + timedelta(seconds=2)
-    row.expires_at = committed_expiry
-
-    async def failed_commit():
-        # Represent a database failure that rolls back the UPDATE.
-        row.expires_at = committed_expiry
-        raise ConnectionError("commit failed")
-
-    service.transaction.commit.side_effect = failed_commit
+    service.transaction.commit.side_effect = ConnectionError("commit failed")
     with pytest.raises(ConnectionError):
-        await service.authenticate(token)
-    cached = await service.cache.get(token_hash(token))
-    assert cached.expires_at == committed_expiry
-    clock.now = committed_expiry
+        await service.verify_session(token)
+    assert not service.redis.records
+
+
+async def test_cache_does_not_outlive_short_session(auth):
+    service, clock = auth
+    service.settings.session_ttl_seconds = 10
+    _, token = await register_and_login(service)
+    await service.verify_session(token)
+    _, cache_expiry = next(iter(service.redis.records.values()))
+    assert cache_expiry == clock.now + timedelta(seconds=10)
+    clock.now = cache_expiry
     with pytest.raises(AuthenticationRequiredError):
-        await service.authenticate(token)
+        await service.verify_session(token)
 
 
-async def test_confirmation_publishes_committed_expiry(auth):
-    service, clock = auth
+async def test_invalid_cache_is_replaced_from_database(auth):
+    service, _ = auth
     _, token = await register_and_login(service)
-    row = next(iter(service.sessions.records.values()))
-    row.expires_at = clock.now + timedelta(days=1)
-    committed_expiry = row.expires_at
-
-    async def check_before_commit():
-        cached = await service.cache.get(token_hash(token))
-        assert cached.expires_at == committed_expiry
-
-    service.transaction.commit.side_effect = check_before_commit
-    current = await service.authenticate(token)
-    cached = await service.cache.get(token_hash(token))
-    assert current.session.expires_at == cached.expires_at == clock.now + timedelta(days=30)
-
-
-@pytest.mark.parametrize("interruption", ["logout", "redis_loss", "replacement"])
-async def test_confirmation_does_not_overwrite_lost_or_replaced_key(auth, interruption):
-    from app.repository.session_cache import CachedSession, RevokedSessionError
-    from app.schemas.user import UserRead
-
-    service, clock = auth
-    _, token = await register_and_login(service)
-    digest = token_hash(token)
-    replacement = None
-
-    async def interrupt_after_commit():
-        nonlocal replacement
-        if interruption == "logout":
-            await service.cache.revoke(digest, service.settings.session_ttl_seconds)
-        else:
-            service.cache.redis.records.clear()
-            if interruption == "replacement":
-                row = next(iter(service.sessions.records.values()))
-                user = service.users.records[row.user_id]
-                replacement = CachedSession(
-                    id=row.id, user=UserRead.model_validate(user), expires_at=row.expires_at
-                )
-                await service.cache.put(digest, replacement, 300)
-
-    service.transaction.commit.side_effect = interrupt_after_commit
-    await service.authenticate(token)
-    if interruption == "logout":
-        with pytest.raises(RevokedSessionError):
-            await service.cache.get(digest)
-    elif interruption == "redis_loss":
-        assert await service.cache.get(digest) is None
-    else:
-        assert (await service.cache.get(digest)).write_id == replacement.write_id
+    await service.redis.set(f"auth:session:{token_hash(token)}", "invalid json", ex=60)
+    assert (await service.verify_session(token)).user.login == "User"

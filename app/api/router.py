@@ -2,7 +2,6 @@ from fastapi import APIRouter, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from redis.exceptions import RedisError
 from starlette.exceptions import HTTPException
 
 from app.api.routers.auth import router as auth_router
@@ -28,12 +27,4 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
                 for error in exc.errors()
             ]
         },
-    )
-
-
-async def redis_error(request: Request, exc: RedisError) -> JSONResponse:
-    return JSONResponse(
-        status_code=503,
-        headers={"Cache-Control": "no-store"},
-        content={"detail": "Session cache unavailable"},
     )

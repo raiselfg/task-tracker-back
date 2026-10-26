@@ -1,10 +1,9 @@
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from redis.exceptions import RedisError
 from starlette.exceptions import HTTPException
 
-from app.api.router import api_router, http_error, redis_error, validation_error
+from app.api.router import api_router, http_error, validation_error
 from app.api.routers.health import router as health_router
 from app.core.config import get_settings
 from app.lifespan import lifespan
@@ -15,7 +14,6 @@ app = FastAPI(
     lifespan=lifespan,
     exception_handlers={
         HTTPException: http_error,
-        RedisError: redis_error,
         RequestValidationError: validation_error,
     },
 )

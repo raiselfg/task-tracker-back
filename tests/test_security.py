@@ -123,7 +123,6 @@ def test_insecure_cookie_requires_explicit_setting():
         {"allowed_origins": ["https://user:pass@app.example.com"]},
         {"allowed_origins": ["https://*.example.com"]},
         {"session_ttl_seconds": 0},
-        {"session_cache_ttl_seconds": 0},
         {"redis_url": "http://localhost:6379"},
         {"database_url": "sqlite:///test.db"},
         {"database_url": "postgresql+psycopg://auth:auth@localhost:5432/auth"},

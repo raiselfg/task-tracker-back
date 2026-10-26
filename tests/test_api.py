@@ -219,31 +219,3 @@ async def test_settings_override_controls_cookies_and_auth(client, application, 
     assert response.status_code == 204
     assert response.headers["set-cookie"].startswith("session=")
     assert "Max-Age=0" in response.headers["set-cookie"]
-
-
-async def test_cached_cookie_does_not_outlive_database_session(client, clock):
-    await client.post("/api/v1/auth/register", json=BODY)
-    await client.post("/api/v1/auth/login", json=BODY)
-    await client.get("/api/v1/auth/me")
-    clock.now += timedelta(seconds=150)
-    response = await client.get("/api/v1/auth/me")
-    assert response.status_code == 200
-    assert "Max-Age=2591850" in response.headers["set-cookie"]
-    clock.now += timedelta(seconds=150)
-    response = await client.get("/api/v1/auth/me")
-    assert "Max-Age=2592000" in response.headers["set-cookie"]
-
-
-async def test_unavailable_cache_returns_503(client, auth_service):
-    from unittest.mock import AsyncMock
-
-    from redis.exceptions import ConnectionError
-
-    await client.post("/api/v1/auth/register", json=BODY)
-    await client.post("/api/v1/auth/login", json=BODY)
-    auth_service.cache.redis.get = AsyncMock(side_effect=ConnectionError("unavailable"))
-    response = await client.get("/api/v1/auth/me")
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Session cache unavailable"}
-    assert response.headers["cache-control"] == "no-store"
-    assert "set-cookie" not in response.headers
