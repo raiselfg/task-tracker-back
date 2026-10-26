@@ -1,7 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import floor
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -158,13 +157,13 @@ class AuthService:
             user=UserRead.model_validate(user),
             expires_at=session.expires_at,
         )
-        ttl = min(60, floor((session.expires_at - self.clock()).total_seconds()))
 
-        if ttl > 15:
-            try:
-                await self.redis.set(key, entry.model_dump_json(), ex=ttl)
-            except RedisError:
-                pass
+        try:
+            await self.redis.set(
+                key, entry.model_dump_json(), ex=self.settings.session_cache_ttl_seconds
+            )
+        except RedisError:
+            pass
 
         return Principal(user, session)
 

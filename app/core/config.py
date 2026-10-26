@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     allowed_origins: list[str]
     allow_insecure_cookies: bool
     session_ttl_seconds: int
+    session_cache_ttl_seconds: int
 
     @model_validator(mode="after")
     def validate_security(self):

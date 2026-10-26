@@ -179,13 +179,15 @@ async def test_logout_keeps_other_sessions(auth):
     assert (await service.verify_session(second)).user.id == current.user.id
 
 
-async def test_cache_hit_skips_database_and_expires_after_sixty_seconds(auth):
+@pytest.mark.parametrize("cache_ttl", [60, 300])
+async def test_cache_hit_skips_database_until_configured_expiry(auth, cache_ttl):
     service, clock = auth
+    service.settings.session_cache_ttl_seconds = cache_ttl
     _, token = await register_and_login(service)
     service.sessions.get_active = AsyncMock(wraps=service.sessions.get_active)
     await service.verify_session(token)
     service.transaction.reset_mock()
-    clock.now += timedelta(seconds=59)
+    clock.now += timedelta(seconds=cache_ttl - 1)
     current = await service.verify_session(token)
     assert service.sessions.get_active.await_count == 1
     service.transaction.commit.assert_not_awaited()
@@ -232,14 +234,15 @@ async def test_failed_commit_does_not_fill_cache(auth):
     assert not service.redis.records
 
 
-async def test_cache_does_not_outlive_short_session(auth):
+async def test_cached_session_is_rejected_at_session_expiry(auth):
     service, clock = auth
     service.settings.session_ttl_seconds = 10
+    service.settings.session_cache_ttl_seconds = 300
     _, token = await register_and_login(service)
     await service.verify_session(token)
     _, cache_expiry = next(iter(service.redis.records.values()))
-    assert cache_expiry == clock.now + timedelta(seconds=10)
-    clock.now = cache_expiry
+    assert cache_expiry == clock.now + timedelta(seconds=300)
+    clock.now += timedelta(seconds=10)
     with pytest.raises(AuthenticationRequiredError):
         await service.verify_session(token)
 
